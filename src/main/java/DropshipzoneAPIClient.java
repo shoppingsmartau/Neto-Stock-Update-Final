@@ -158,7 +158,7 @@ public class DropshipzoneAPIClient {
                     }
 
                 } catch (org.json.JSONException jsonE) {
-                    System.err.println("ERROR: Failed to parse Dropshipzone Products API response for SKU batch " + ((i / DROPSHIPZONE_API_SKU_LIMIT) + 1) + ", page " + requestedPageNumber + ".");
+                    System.err.println("ERROR: Failed to parse Dropshipzone Products API response for SKU batch " + ((i / DROPSHIPZONE_API_SKU_LIMIT) + 1) + ", Page " + requestedPageNumber + ".");
                     System.err.println("Problem reading or parsing response: " + jsonE.getMessage());
                     jsonE.printStackTrace();
                     pageResultJson = new JSONObject("{\"result\":[],\"total\":0,\"total_pages\":0,\"current_page\":0}");
@@ -204,7 +204,7 @@ public class DropshipzoneAPIClient {
             String sku = item.optString("sku", "INVALID_SKU");
             int stock_qty = 0;
             String cost = "0.00";
-            String sellingPrice = "0"; // Initialize selling price as a whole number string
+            String sellingPrice = "0.0"; // Initialize selling price as a decimal string
 
             if (!sku.equals("INVALID_SKU")) { // Only process if SKU is valid
                 String stockQtyStr = item.optString("stock_qty", "0");
@@ -226,16 +226,26 @@ public class DropshipzoneAPIClient {
                     cost = "0.00";
                 }
 
-                // Calculate Selling Price: price * 1.4 rounded to nearest whole number
+                // Calculate Selling Price: price * 1.4
                 String priceStr = item.optString("price", "0.00");
                 try {
                     double price = Double.parseDouble(priceStr);
                     double calculatedSellingPrice = price * 1.4;
-                    // Round to nearest whole number and convert to integer string
-                    sellingPrice = String.valueOf(Math.round(calculatedSellingPrice));
+
+                    // Apply the .9 decimal rule
+                    double sellingPriceValue;
+                    // Using a small epsilon to check if it's effectively a whole number
+                    if (Math.abs(calculatedSellingPrice - Math.round(calculatedSellingPrice)) < 0.00001) {
+                        sellingPriceValue = calculatedSellingPrice; // Keep as whole number if it is (e.g., 14.0)
+                    } else {
+                        // If it has any decimal part, set it to X.9
+                        sellingPriceValue = Math.floor(calculatedSellingPrice) + 0.9;
+                    }
+                    sellingPrice = String.format("%.1f", sellingPriceValue); // Format to one decimal place
+
                 } catch (NumberFormatException e) {
-                    System.err.println("Warning: Invalid number format for 'price': '" + priceStr + "' for SKU " + sku + ". Defaulting selling price to 0.");
-                    sellingPrice = "0";
+                    System.err.println("Warning: Invalid number format for 'price': '" + priceStr + "' for SKU " + sku + ". Defaulting selling price to 0.0.");
+                    sellingPrice = "0.0";
                 }
 
 
@@ -305,8 +315,9 @@ public class DropshipzoneAPIClient {
      * @param httpClient The shared HttpClient instance to use for the request.
      * @param sku The SKU of the item to update.
      * @param quantity The new quantity to set for the item.
+     * @param sellingPrice The new selling price to set for the item's DefaultPrice field.
      */
-    protected static void updateNetoItem(HttpClient httpClient, String sku, int quantity) {
+    protected static void updateNetoItem(HttpClient httpClient, String sku, int quantity, String sellingPrice) {
         String netoUrl = "https://www.shoppingsmart.com.au/do/WS/NetoAPI";
 
         String netoUsername = System.getenv("NETOAPI_USERNAME");
@@ -324,7 +335,8 @@ public class DropshipzoneAPIClient {
 
         JSONObject item = new JSONObject()
                 .put("SKU", sku)
-                .put("WarehouseQuantity", warehouseQuantity);
+                .put("WarehouseQuantity", warehouseQuantity)
+                .put("DefaultPrice", sellingPrice); // Set DefaultPrice from sellingPrice
 
         JSONObject payload = new JSONObject()
                 .put("Item", item);
@@ -347,8 +359,8 @@ public class DropshipzoneAPIClient {
             String rawResponse = response.body();
             String statusMessage = "Neto API Raw Response for SKU " + sku + " (Code: " + responseCode + "): " + rawResponse;
 
-            System.out.println(String.format("Neto Update Status for SKU %s (Qty: %d): Response Code: %d. %s",
-                sku, quantity, responseCode, statusMessage));
+            System.out.println(String.format("Neto Update Status for SKU %s (Qty: %d, DefaultPrice: %s): Response Code: %d. %s",
+                sku, quantity, sellingPrice, responseCode, statusMessage)); // Log sellingPrice
 
             try {
                 JSONObject netoResponseJson = new JSONObject(rawResponse);
@@ -361,8 +373,8 @@ public class DropshipzoneAPIClient {
         } catch (IOException | InterruptedException e) {
             System.err.println("Error calling Neto API for SKU " + sku + ": " + e.getMessage());
             e.printStackTrace();
-            System.out.println(String.format("Neto Update Status for SKU %s (Qty: %d): Failed due to I/O Error or Interruption: %s",
-                sku, quantity, e.getMessage()));
+            System.out.println(String.format("Neto Update Status for SKU %s (Qty: %d, DefaultPrice: %s): Failed due to I/O Error or Interruption: %s",
+                sku, quantity, sellingPrice, e.getMessage())); // Log sellingPrice
         }
     }
 }

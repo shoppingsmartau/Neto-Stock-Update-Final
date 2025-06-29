@@ -147,12 +147,12 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                 String sku = entry.get("sku");
                 int quantity = Integer.parseInt(entry.get("quantity"));
                 String cost = entry.get("cost");
-                String sellingPrice = entry.get("selling_price"); // Get selling price for logging
+                String sellingPrice = entry.get("selling_price"); // Get selling price for Neto update
 
                 context.getLogger().log(String.format("Prepared for Neto Update/CSV Output: SKU=%s, Quantity=%d, Cost=%s, SellingPrice=%s", sku, quantity, cost, sellingPrice));
 
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    DropshipzoneAPIClient.updateNetoItem(httpClient, sku, quantity);
+                    DropshipzoneAPIClient.updateNetoItem(httpClient, sku, quantity, sellingPrice); // Pass sellingPrice
                 }, executorService);
 
                 futures.add(future);
