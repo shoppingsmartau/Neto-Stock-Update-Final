@@ -6,11 +6,16 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request; // For listing objects
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response; // For listing objects
+import software.amazon.awssdk.services.s3.model.S3Object;           // For S3 object details
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest; // For deleting objects
 import software.amazon.awssdk.core.sync.RequestBody;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Comparator; // For sorting objects
 
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 
@@ -105,12 +110,24 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
         String s3OutputBucketName = System.getenv("S3_OUTPUT_BUCKET_NAME");
         String s3OutputFilePrefix = System.getenv("S3_OUTPUT_FILE_PREFIX");
 
+        // New environment variable for price multiplier
+        double priceMultiplier = 1.4; // Default value
+        try {
+            priceMultiplier = Double.parseDouble(System.getenv().getOrDefault("PRICE_MULTIPLIER", "1.4"));
+        } catch (NumberFormatException e) {
+            context.getLogger().log("Warning: Invalid PRICE_MULTIPLIER environment variable. Using default value 1.4.");
+        }
+
+        // New environment variable for max files to keep
+        int s3OutputMaxFiles = Integer.parseInt(System.getenv().getOrDefault("S3_OUTPUT_MAX_FILES", "5"));
+
+
         if (s3InputBucketName == null || s3InputFileKey == null || s3InputBucketName.isEmpty() || s3InputFileKey.isEmpty()) {
             context.getLogger().log("Error: S3_INPUT_BUCKET_NAME or S3_INPUT_FILE_KEY environment variables not set. Aborting execution.");
             throw new RuntimeException("S3 input bucket or file key not configured.");
         }
         if (s3OutputBucketName == null || s3OutputFilePrefix == null || s3OutputBucketName.isEmpty() || s3OutputFilePrefix.isEmpty()) {
-             context.getLogger().log("Warning: S3_OUTPUT_BUCKET_NAME or S3_OUTPUT_FILE_PREFIX environment variables not set. Output CSV will not be generated.");
+             context.getLogger().log("Warning: S3_OUTPUT_BUCKET_NAME or S3_OUTPUT_FILE_PREFIX environment variables not set. Output CSV will not be generated and cleanup will not run.");
         }
 
 
@@ -137,7 +154,8 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
 
             // 4. Fetch stock data from Dropshipzone API (fetchStock now populates finalProcessedSkuData directly)
             context.getLogger().log("Starting to fetch and process stock data from Dropshipzone API...");
-            DropshipzoneAPIClient.fetchStock(httpClient, token, skuList, finalProcessedSkuData);
+            // Pass the priceMultiplier to fetchStock
+            DropshipzoneAPIClient.fetchStock(httpClient, token, skuList, finalProcessedSkuData, priceMultiplier);
             context.getLogger().log("Finished fetching and processing stock data from Dropshipzone API. Total unique SKUs processed: " + finalProcessedSkuData.size());
 
             // 5. Update Neto items in parallel
@@ -147,12 +165,12 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                 String sku = entry.get("sku");
                 int quantity = Integer.parseInt(entry.get("quantity"));
                 String cost = entry.get("cost");
-                String sellingPrice = entry.get("selling_price"); // Get selling price for Neto update
+                String sellingPrice = entry.get("selling_price");
 
                 context.getLogger().log(String.format("Prepared for Neto Update/CSV Output: SKU=%s, Quantity=%d, Cost=%s, SellingPrice=%s", sku, quantity, cost, sellingPrice));
 
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    DropshipzoneAPIClient.updateNetoItem(httpClient, sku, quantity, sellingPrice); // Pass sellingPrice
+                    DropshipzoneAPIClient.updateNetoItem(httpClient, sku, quantity, sellingPrice);
                 }, executorService);
 
                 futures.add(future);
@@ -171,6 +189,10 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                                       ".csv";
                 uploadCsvToS3(s3Client, s3OutputBucketName, outputS3Key, csvContent);
                 context.getLogger().log("Output CSV uploaded to s3://" + s3OutputBucketName + "/" + outputS3Key);
+
+                // 7. Clean up old files in the output bucket
+                cleanOldS3Files(s3Client, s3OutputBucketName, s3OutputFilePrefix, s3OutputMaxFiles);
+                context.getLogger().log("S3 cleanup complete for bucket " + s3OutputBucketName + " with prefix " + s3OutputFilePrefix);
             }
 
 
@@ -200,14 +222,14 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
      */
     private String generateCsvContent(List<Map<String, String>> data) {
         StringBuilder csvBuilder = new StringBuilder();
-        csvBuilder.append("SKU,Quantity,Cost,Selling Price\n"); // Updated header
+        csvBuilder.append("SKU,Quantity,Cost,Selling Price\n");
 
         for (Map<String, String> entry : data) {
             String sku = entry.get("sku");
             String quantity = entry.get("quantity");
             String cost = entry.get("cost");
-            String sellingPrice = entry.get("selling_price"); // Get selling price
-            csvBuilder.append(String.format("%s,%s,%s,%s\n", escapeCsv(sku), escapeCsv(quantity), escapeCsv(cost), escapeCsv(sellingPrice))); // Updated row
+            String sellingPrice = entry.get("selling_price");
+            csvBuilder.append(String.format("%s,%s,%s,%s\n", escapeCsv(sku), escapeCsv(quantity), escapeCsv(cost), escapeCsv(sellingPrice)));
         }
         return csvBuilder.toString();
     }
@@ -250,6 +272,71 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
             System.err.println("Error uploading CSV to S3 bucket '" + bucketName + "' with key '" + key + "': " + e.getMessage());
             e.printStackTrace();
             throw new IOException("Failed to upload CSV to S3.", e);
+        }
+    }
+
+    /**
+     * Cleans up old S3 files in the specified output bucket, retaining only the most recent files
+     * based on the provided prefix and max files count.
+     *
+     * @param s3Client The S3Client instance.
+     * @param bucketName The name of the S3 bucket to clean.
+     * @param prefix The prefix for the files to consider for cleanup.
+     * @param maxFilesToKeep The maximum number of files to retain.
+     */
+    private void cleanOldS3Files(S3Client s3Client, String bucketName, String prefix, int maxFilesToKeep) {
+        System.out.println("Starting S3 cleanup for bucket: " + bucketName + ", prefix: " + prefix + ", max files to keep: " + maxFilesToKeep);
+
+        try {
+            ListObjectsV2Request listObjectsRequest = ListObjectsV2Request.builder()
+                    .bucket(bucketName)
+                    .prefix(prefix)
+                    .build();
+
+            ListObjectsV2Response listObjectsResponse;
+            List<S3Object> allMatchingObjects = new ArrayList<>();
+
+            // Paginate through all objects if more than 1000
+            String continuationToken = null;
+            do {
+                listObjectsResponse = s3Client.listObjectsV2(listObjectsRequest.toBuilder().continuationToken(continuationToken).build());
+                allMatchingObjects.addAll(listObjectsResponse.contents());
+                continuationToken = listObjectsResponse.nextContinuationToken();
+            } while (listObjectsResponse.isTruncated());
+
+
+            // Filter for CSV files and sort by LastModified timestamp (newest first)
+            List<S3Object> csvFiles = new ArrayList<>();
+            for(S3Object s3Object : allMatchingObjects) {
+                if (s3Object.key().endsWith(".csv")) { // Only consider CSV files
+                    csvFiles.add(s3Object);
+                }
+            }
+
+            csvFiles.sort(Comparator.comparing(S3Object::lastModified).reversed()); // Sort newest to oldest
+
+            System.out.println("Found " + csvFiles.size() + " matching CSV files for cleanup under prefix: " + prefix);
+
+            if (csvFiles.size() > maxFilesToKeep) {
+                List<S3Object> filesToDelete = csvFiles.subList(maxFilesToKeep, csvFiles.size());
+                System.out.println("Identified " + filesToDelete.size() + " files for deletion.");
+
+                for (S3Object fileToDelete : filesToDelete) {
+                    DeleteObjectRequest deleteObjectRequest = DeleteObjectRequest.builder()
+                            .bucket(bucketName)
+                            .key(fileToDelete.key())
+                            .build();
+                    s3Client.deleteObject(deleteObjectRequest);
+                    System.out.println("Deleted old S3 file: " + fileToDelete.key());
+                }
+            } else {
+                System.out.println("Number of CSV files (" + csvFiles.size() + ") is less than or equal to max files to keep (" + maxFilesToKeep + "). No files deleted.");
+            }
+
+        } catch (Exception e) {
+            System.err.println("Error during S3 cleanup: " + e.getMessage());
+            e.printStackTrace();
+            // Don't re-throw as cleanup is a secondary operation, main flow should not fail because of it.
         }
     }
 }

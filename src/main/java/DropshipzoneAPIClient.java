@@ -99,9 +99,10 @@ public class DropshipzoneAPIClient {
      * @param token The JWT token obtained from the authentication step.
      * @param allSkus A list of all SKU strings for which to fetch data.
      * @param processedSkuDataMap A Map to be populated with processed SKU data (SKU -> {quantity, cost, selling_price}).
+     * @param priceMultiplier The multiplier to calculate selling price.
      * @throws IOException If an I/O error occurs during any HTTP request.
      */
-    protected static void fetchStock(HttpClient httpClient, String token, List<String> allSkus, Map<String, Map<String, String>> processedSkuDataMap) throws IOException, InterruptedException {
+    protected static void fetchStock(HttpClient httpClient, String token, List<String> allSkus, Map<String, Map<String, String>> processedSkuDataMap, double priceMultiplier) throws IOException, InterruptedException {
         String productsBaseUrl = "https://api.dropshipzone.com.au/v2/products";
 
         // Iterate through all SKUs in batches of DROPSHIPZONE_API_SKU_LIMIT
@@ -167,7 +168,8 @@ public class DropshipzoneAPIClient {
 
                 if (pageResultJson.has("result") && pageResultJson.getJSONArray("result").length() > 0) {
                     JSONArray pageProductsArray = pageResultJson.getJSONArray("result");
-                    processAndAddSkuData(pageProductsArray, processedSkuDataMap);
+                    // Pass priceMultiplier to the processing method
+                    processAndAddSkuData(pageProductsArray, processedSkuDataMap, priceMultiplier);
                 }
 
                 // Always get total_pages from the API response
@@ -188,8 +190,9 @@ public class DropshipzoneAPIClient {
      *
      * @param apiData The JSONArray of products from one API page/batch.
      * @param processedSkuDataMap The map to update with processed SKU data.
+     * @param priceMultiplier The multiplier to calculate selling price.
      */
-    private static void processAndAddSkuData(JSONArray apiData, Map<String, Map<String, String>> processedSkuDataMap) {
+    private static void processAndAddSkuData(JSONArray apiData, Map<String, Map<String, String>> processedSkuDataMap, double priceMultiplier) {
         for (Object obj : apiData) {
             JSONObject item;
             try {
@@ -226,11 +229,11 @@ public class DropshipzoneAPIClient {
                     cost = "0.00";
                 }
 
-                // Calculate Selling Price: price * 1.4
+                // Calculate Selling Price: price * priceMultiplier
                 String priceStr = item.optString("price", "0.00");
                 try {
                     double price = Double.parseDouble(priceStr);
-                    double calculatedSellingPrice = price * 1.4;
+                    double calculatedSellingPrice = price * priceMultiplier;
 
                     // Apply the .9 decimal rule
                     double sellingPriceValue;
