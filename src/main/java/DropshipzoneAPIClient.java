@@ -277,13 +277,13 @@ public class DropshipzoneAPIClient {
 
     /**
      * Processes API data and applies the quantity rule (qty < 25 -> 0).
-     * Returns the processed SKU and quantity as a List of String arrays.
+     * Now also extracts the 'cost' field.
      *
      * @param apiData The JSONArray containing product information returned from the API.
      * @param allOriginalSkus The complete list of SKUs read from the input CSV.
-     * @return A list of String arrays, where each inner array is [sku, processed_quantity_string].
+     * @return A list of Maps, where each map contains "sku", "quantity", and "cost".
      */
-    protected static List<String[]> processStockData(JSONArray apiData, List<String> allOriginalSkus) {
+    protected static List<Map<String, String>> processStockData(JSONArray apiData, List<String> allOriginalSkus) {
         Map<String, JSONObject> apiDataMap = new HashMap<>();
         for (Object obj : apiData) {
             JSONObject item;
@@ -299,14 +299,15 @@ public class DropshipzoneAPIClient {
             apiDataMap.put(item.optString("sku", "INVALID_SKU"), item);
         }
 
-        List<String[]> processedSkuData = new ArrayList<>();
+        List<Map<String, String>> processedSkuData = new ArrayList<>();
         // Only process SKUs that were explicitly in our input CSV
         for (String sku : allOriginalSkus) {
             JSONObject item = apiDataMap.get(sku);
             int stock_qty = 0; // Default to 0
+            String cost = "0.00"; // Default cost to 0.00
 
             if (item != null) {
-                // Now reading from 'stock_qty' field as per user's clarification
+                // Read from 'stock_qty' field
                 String stockQtyStr = item.optString("stock_qty", "0");
                 try {
                     stock_qty = (int) Double.parseDouble(stockQtyStr);
@@ -317,10 +318,26 @@ public class DropshipzoneAPIClient {
                     System.err.println("Warning: Invalid number format for 'stock_qty': '" + stockQtyStr + "' for SKU " + sku + ". Defaulting to 0.");
                     stock_qty = 0; // Ensure it's 0 on parse error too
                 }
+
+                // Read from 'cost' field
+                cost = item.optString("cost", "0.00");
+                try {
+                    // Optional: Validate cost is a number, if not, keep default
+                    Double.parseDouble(cost);
+                } catch (NumberFormatException e) {
+                    System.err.println("Warning: Invalid number format for 'cost': '" + cost + "' for SKU " + sku + ". Defaulting to 0.00.");
+                    cost = "0.00";
+                }
+
             } else {
-                System.out.println("Info: SKU " + sku + " from CSV not found in Dropshipzone API /v2/products response. Setting quantity to 0.");
+                System.out.println("Info: SKU " + sku + " from CSV not found in Dropshipzone API /v2/products response. Setting quantity and cost to 0.");
             }
-            processedSkuData.add(new String[]{sku, String.valueOf(stock_qty)});
+
+            Map<String, String> skuEntry = new HashMap<>();
+            skuEntry.put("sku", sku);
+            skuEntry.put("quantity", String.valueOf(stock_qty));
+            skuEntry.put("cost", cost);
+            processedSkuData.add(skuEntry);
         }
         return processedSkuData;
     }
@@ -470,13 +487,17 @@ public class DropshipzoneAPIClient {
                 System.out.println("Local Test: No stock data found in the 'result' field of the response.");
             }
 
-            List<String[]> processedSkuData = processStockData(resultArray, skuList);
+            // The processedSkuData now holds List<Map<String, String>>
+            List<Map<String, String>> processedSkuData = processStockData(resultArray, skuList);
             System.out.println("Local Test: Processed stock data for " + processedSkuData.size() + " SKUs.");
 
             System.out.println("\n--- Local Test: Updating Neto Items ---");
-            for (String[] entry : processedSkuData) {
-                String sku = entry[0];
-                int quantity = Integer.parseInt(entry[1]);
+            for (Map<String, String> entry : processedSkuData) { // Changed loop type
+                String sku = entry.get("sku");
+                int quantity = Integer.parseInt(entry.get("quantity"));
+                String cost = entry.get("cost"); // Get the cost
+
+                System.out.println(String.format("Local Test: Prepared to update Neto: SKU=%s, Quantity=%d, Cost=%s", sku, quantity, cost));
                 updateNetoItem(sku, quantity); // Call synchronously for local testing simplicity
             }
             System.out.println("Local Test: Completed Neto updates.");
