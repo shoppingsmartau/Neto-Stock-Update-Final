@@ -14,18 +14,19 @@ import java.time.format.DateTimeFormatter;
 
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 
+import java.net.http.HttpClient;
+import java.io.IOException;
 
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.json.JSONArray;
 import org.json.JSONObject;
-
-import java.io.IOException;
 
 
 /**
@@ -34,14 +35,15 @@ import java.io.IOException;
  *
  * This class orchestrates the calls to DropshipzoneAPIClient methods,
  * including loading SKUs from S3 and updating Neto items in parallel,
- * and now also generates an output CSV with cost data.
+ * and now also generates an output CSV with cost and selling price data.
  */
 public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
 
-    private static final int NETO_UPDATE_THREAD_POOL_SIZE = 10;
+    private static final int NETO_UPDATE_THREAD_POOL_SIZE = 20; // Increased thread pool size
     private final ExecutorService executorService = Executors.newFixedThreadPool(NETO_UPDATE_THREAD_POOL_SIZE);
 
     private S3Client s3Client; // S3Client instance
+    private HttpClient httpClient; // Shared HttpClient instance for Dropshipzone and Neto APIs
 
     // S3 client-side timeouts
     private static final int S3_CONNECT_TIMEOUT_MS = 5000;
@@ -51,21 +53,19 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
 
     // Add a public zero-argument constructor as required by AWS Lambda
     public LambdaHandler() {
-        System.out.println("LambdaHandler constructor invoked. Initializing S3Client.");
+        System.out.println("LambdaHandler constructor invoked. Initializing S3Client and HttpClient.");
         String awsRegion = System.getenv("AWS_REGION");
 
-        // Build ClientOverrideConfiguration for timeouts
-        ClientOverrideConfiguration clientConfig = ClientOverrideConfiguration.builder()
+        // --- S3Client Initialization (remains similar) ---
+        ClientOverrideConfiguration s3ClientConfig = ClientOverrideConfiguration.builder()
                 .apiCallTimeout(Duration.ofMillis(S3_API_CALL_TIMEOUT_MS))
-                .apiCallAttemptTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)) // This applies to each retry attempt
+                .apiCallAttemptTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS))
                 .build();
 
-        // Explicitly set HTTP client to UrlConnectionHttpClient to avoid "Multiple HTTP implementations" error.
-        // This also explicitly uses S3Client.Builder which resolves symbol issues when using 'var'.
         if (awsRegion != null && !awsRegion.isEmpty()) {
             this.s3Client = S3Client.builder()
                     .region(Region.of(awsRegion))
-                    .overrideConfiguration(clientConfig)
+                    .overrideConfiguration(s3ClientConfig)
                     .httpClientBuilder(UrlConnectionHttpClient.builder()
                             .connectionTimeout(Duration.ofMillis(S3_CONNECT_TIMEOUT_MS))
                             .socketTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)))
@@ -75,29 +75,35 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
             System.err.println("AWS_REGION environment variable not found. Using default Region.US_EAST_1.");
             this.s3Client = S3Client.builder()
                     .region(Region.US_EAST_1) // Fallback region
-                    .overrideConfiguration(clientConfig)
+                    .overrideConfiguration(s3ClientConfig)
                     .httpClientBuilder(UrlConnectionHttpClient.builder()
                             .connectionTimeout(Duration.ofMillis(S3_CONNECT_TIMEOUT_MS))
                             .socketTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)))
                     .build();
             System.out.println("S3Client initialized with fallback region: " + Region.US_EAST_1.id());
         }
+
+        // --- Shared HttpClient Initialization for Dropshipzone and Neto APIs ---
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(DropshipzoneAPIClient.CONNECT_TIMEOUT_MS))
+                .build();
+        System.out.println("Shared HttpClient initialized for external APIs.");
     }
 
     @Override
     public Void handleRequest(ScheduledEvent event, Context context) {
         context.getLogger().log("Lambda function invoked by CloudWatch Event at: " + event.getTime());
 
-        // --- NEW DEBUGGING LOGS FOR ENVIRONMENT VARIABLES ---
+        // --- DEBUGGING LOGS FOR ENVIRONMENT VARIABLES (Keep these for now) ---
         context.getLogger().log("Checking environment variable: S3_INPUT_BUCKET_NAME = " + System.getenv("S3_INPUT_BUCKET_NAME"));
         context.getLogger().log("Checking environment variable: S3_INPUT_FILE_KEY = " + System.getenv("S3_INPUT_FILE_KEY"));
-        // --- END NEW DEBUGGING LOGS ---
+        // --- END DEBUGGING LOGS ---
 
 
-        String s3InputBucketName = System.getenv("S3_INPUT_BUCKET_NAME"); // Renamed for clarity
-        String s3InputFileKey = System.getenv("S3_INPUT_FILE_KEY");       // Renamed for clarity
-        String s3OutputBucketName = System.getenv("S3_OUTPUT_BUCKET_NAME"); // New env var for output bucket
-        String s3OutputFilePrefix = System.getenv("S3_OUTPUT_FILE_PREFIX"); // New env var for output file prefix
+        String s3InputBucketName = System.getenv("S3_INPUT_BUCKET_NAME");
+        String s3InputFileKey = System.getenv("S3_INPUT_FILE_KEY");
+        String s3OutputBucketName = System.getenv("S3_OUTPUT_BUCKET_NAME");
+        String s3OutputFilePrefix = System.getenv("S3_OUTPUT_FILE_PREFIX");
 
         if (s3InputBucketName == null || s3InputFileKey == null || s3InputBucketName.isEmpty() || s3InputFileKey.isEmpty()) {
             context.getLogger().log("Error: S3_INPUT_BUCKET_NAME or S3_INPUT_FILE_KEY environment variables not set. Aborting execution.");
@@ -105,13 +111,12 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
         }
         if (s3OutputBucketName == null || s3OutputFilePrefix == null || s3OutputBucketName.isEmpty() || s3OutputFilePrefix.isEmpty()) {
              context.getLogger().log("Warning: S3_OUTPUT_BUCKET_NAME or S3_OUTPUT_FILE_PREFIX environment variables not set. Output CSV will not be generated.");
-             // Don't throw RuntimeException here, allow main logic to proceed if only output is affected.
         }
 
 
         try {
             // 1. Authenticate with Dropshipzone API
-            String token = DropshipzoneAPIClient.authenticate();
+            String token = DropshipzoneAPIClient.authenticate(httpClient);
             if (token == null) {
                 context.getLogger().log("Failed to extract Dropshipzone token. Aborting execution.");
                 throw new RuntimeException("Authentication failed.");
@@ -127,52 +132,32 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
             }
             context.getLogger().log("Loaded SKUs from S3: " + skuList.size() + " SKUs.");
 
-            // 3. Fetch stock data from Dropshipzone API
-            String stockResponse = DropshipzoneAPIClient.fetchStock(token, skuList);
+            // 3. Prepare a Map to collect all processed SKU data (SKU -> {quantity, cost, selling_price})
+            Map<String, Map<String, String>> finalProcessedSkuData = new HashMap<>();
 
-            JSONObject stockJson;
-            try {
-                stockJson = new JSONObject(stockResponse);
-            } catch (org.json.JSONException jsonE) {
-                context.getLogger().log("CRITICAL ERROR: Failed to parse combined stock response into JSONObject.");
-                context.getLogger().log("Raw response content that failed parsing: " + stockResponse);
-                jsonE.printStackTrace();
-                throw new RuntimeException("Failed to parse main stock JSON response.", jsonE);
-            }
-
-            // 4. Process stock data in memory (applying quantity < 25 rule and extracting cost)
-            JSONArray resultArray = new JSONArray();
-            if (stockJson.has("result") && stockJson.getJSONArray("result").length() > 0) {
-                resultArray = stockJson.getJSONArray("result");
-                context.getLogger().log("Total stock items fetched from Dropshipzone API: " + resultArray.length());
-            } else {
-                context.getLogger().log("No stock data found in the 'result' field of the response.");
-            }
-
-            // Processed data now includes cost
-            List<Map<String, String>> processedSkuData = DropshipzoneAPIClient.processStockData(resultArray, skuList);
-            context.getLogger().log("Processed stock data for " + processedSkuData.size() + " SKUs (including cost).");
-
+            // 4. Fetch stock data from Dropshipzone API (fetchStock now populates finalProcessedSkuData directly)
+            context.getLogger().log("Starting to fetch and process stock data from Dropshipzone API...");
+            DropshipzoneAPIClient.fetchStock(httpClient, token, skuList, finalProcessedSkuData);
+            context.getLogger().log("Finished fetching and processing stock data from Dropshipzone API. Total unique SKUs processed: " + finalProcessedSkuData.size());
 
             // 5. Update Neto items in parallel
             context.getLogger().log("\n--- Updating Neto Items in Parallel ---");
             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            for (Map<String, String> entry : processedSkuData) {
+            for (Map<String, String> entry : finalProcessedSkuData.values()) {
                 String sku = entry.get("sku");
                 int quantity = Integer.parseInt(entry.get("quantity"));
-                String cost = entry.get("cost"); // Get the cost for logging/output
+                String cost = entry.get("cost");
+                String sellingPrice = entry.get("selling_price"); // Get selling price for logging
 
-                // Log the SKU, quantity, and cost being sent to Neto or for output
-                context.getLogger().log(String.format("Prepared for Neto Update/CSV Output: SKU=%s, Quantity=%d, Cost=%s", sku, quantity, cost));
+                context.getLogger().log(String.format("Prepared for Neto Update/CSV Output: SKU=%s, Quantity=%d, Cost=%s, SellingPrice=%s", sku, quantity, cost, sellingPrice));
 
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    DropshipzoneAPIClient.updateNetoItem(sku, quantity);
+                    DropshipzoneAPIClient.updateNetoItem(httpClient, sku, quantity);
                 }, executorService);
 
                 futures.add(future);
             }
 
-            // Wait for all parallel Neto update operations to complete
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             context.getLogger().log("All SKUs processed for update in Neto.");
 
@@ -180,7 +165,7 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
             if (s3OutputBucketName != null && !s3OutputBucketName.isEmpty() &&
                 s3OutputFilePrefix != null && !s3OutputFilePrefix.isEmpty()) {
                 context.getLogger().log("\n--- Generating and Uploading Output CSV to S3 ---");
-                String csvContent = generateCsvContent(processedSkuData);
+                String csvContent = generateCsvContent(new ArrayList<>(finalProcessedSkuData.values()));
                 String outputS3Key = s3OutputFilePrefix + "_" +
                                       DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneOffset.UTC).format(Instant.now()) +
                                       ".csv";
@@ -203,31 +188,26 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                 Thread.currentThread().interrupt();
                 context.getLogger().log("Executor service termination interrupted.");
             }
-            // Removed S3Client close here. S3Client should be managed by the Lambda container lifecycle.
-            // if (s3Client != null) {
-            //     s3Client.close();
-            //     context.getLogger().log("S3Client closed.");
-            // }
         }
         return null;
     }
 
     /**
      * Generates CSV content from the processed SKU data.
-     * The CSV will have a header: SKU,Quantity,Cost
-     * @param data The list of maps containing SKU, quantity, and cost.
+     * The CSV will have a header: SKU,Quantity,Cost,Selling Price
+     * @param data The list of maps containing SKU, quantity, cost, and selling price.
      * @return A String containing the CSV content.
      */
     private String generateCsvContent(List<Map<String, String>> data) {
         StringBuilder csvBuilder = new StringBuilder();
-        // Add CSV Header
-        csvBuilder.append("SKU,Quantity,Cost\n");
+        csvBuilder.append("SKU,Quantity,Cost,Selling Price\n"); // Updated header
 
         for (Map<String, String> entry : data) {
             String sku = entry.get("sku");
             String quantity = entry.get("quantity");
             String cost = entry.get("cost");
-            csvBuilder.append(String.format("%s,%s,%s\n", escapeCsv(sku), escapeCsv(quantity), escapeCsv(cost)));
+            String sellingPrice = entry.get("selling_price"); // Get selling price
+            csvBuilder.append(String.format("%s,%s,%s,%s\n", escapeCsv(sku), escapeCsv(quantity), escapeCsv(cost), escapeCsv(sellingPrice))); // Updated row
         }
         return csvBuilder.toString();
     }
@@ -247,7 +227,6 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
         }
         return value;
     }
-
 
     /**
      * Uploads the generated CSV content to an S3 bucket.
