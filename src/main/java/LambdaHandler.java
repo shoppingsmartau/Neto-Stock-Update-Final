@@ -4,9 +4,11 @@ import com.amazonaws.services.lambda.runtime.events.ScheduledEvent;
 
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+// RE-ADDED: Import ClientOverrideConfiguration
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+// RE-ADDED: Import Duration for timeouts
 import java.time.Duration;
-
+// RE-ADDED: Import UrlConnectionHttpClient
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 
 
@@ -33,11 +35,10 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
 
     private S3Client s3Client; // S3Client instance
 
-    // Define S3 client-side timeouts (in milliseconds)
-    // Adjust these based on your typical file size and network conditions
-    private static final int S3_CONNECT_TIMEOUT_MS = 5000; // 5 seconds to establish connection
-    private static final int S3_READ_TIMEOUT_MS = 30000;  // 30 seconds to read data from stream (longer for larger files)
-    private static final int S3_API_CALL_TIMEOUT_MS = 45000; // 45 seconds for entire API call (connect + read + processing)
+    // S3 client-side timeouts (these variables are now used again)
+    private static final int S3_CONNECT_TIMEOUT_MS = 5000;
+    private static final int S3_READ_TIMEOUT_MS = 30000;
+    private static final int S3_API_CALL_TIMEOUT_MS = 45000;
 
 
     // Add a public zero-argument constructor as required by AWS Lambda
@@ -51,26 +52,29 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                 .apiCallAttemptTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)) // This applies to each retry attempt
                 .build();
 
-        // Using 'var' for type inference to resolve compilation issues with S3Client.Builder
-        var s3ClientBuilder = S3Client.builder() // Line 55 (previously 59/57)
-                .overrideConfiguration(clientConfig)
-                .httpClientBuilder(UrlConnectionHttpClient.builder()
-                        .connectionTimeout(Duration.ofMillis(S3_CONNECT_TIMEOUT_MS))
-                        .socketTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)));
-
-
+        // --- RE-ADDED EXPLICIT S3Client INITIALIZATION WITH HTTP CLIENT AND TIMEOUTS ---
+        // This explicitly tells the SDK to use UrlConnectionHttpClient, resolving the "Multiple HTTP implementations" error.
         if (awsRegion != null && !awsRegion.isEmpty()) {
-            this.s3Client = s3ClientBuilder
+            this.s3Client = S3Client.builder()
                     .region(Region.of(awsRegion))
+                    .overrideConfiguration(clientConfig) // Re-added client configuration
+                    .httpClientBuilder(UrlConnectionHttpClient.builder() // Explicitly set HTTP client
+                            .connectionTimeout(Duration.ofMillis(S3_CONNECT_TIMEOUT_MS))
+                            .socketTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)))
                     .build();
             System.out.println("S3Client initialized with region: " + awsRegion);
         } else {
             System.err.println("AWS_REGION environment variable not found. Using default Region.US_EAST_1.");
-            this.s3Client = s3ClientBuilder
+            this.s3Client = S3Client.builder()
                     .region(Region.US_EAST_1) // Fallback region
+                    .overrideConfiguration(clientConfig) // Re-added client configuration
+                    .httpClientBuilder(UrlConnectionHttpClient.builder() // Explicitly set HTTP client
+                            .connectionTimeout(Duration.ofMillis(S3_CONNECT_TIMEOUT_MS))
+                            .socketTimeout(Duration.ofMillis(S3_READ_TIMEOUT_MS)))
                     .build();
             System.out.println("S3Client initialized with fallback region: " + Region.US_EAST_1.id());
         }
+        // --- END RE-ADDED EXPLICIT S3Client INITIALIZATION ---
     }
 
     @Override
@@ -129,13 +133,13 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
             JSONArray resultArray = new JSONArray();
             if (stockJson.has("result") && stockJson.getJSONArray("result").length() > 0) {
                 resultArray = stockJson.getJSONArray("result");
-                context.getLogger().log("Total stock items fetched successfully from API: " + resultArray.length());
+                context.getLogger().log("Total stock items fetched from Dropshipzone API: " + resultArray.length());
             } else {
                 context.getLogger().log("No stock data found in the 'result' field of the response.");
             }
 
             List<String[]> processedSkuData = DropshipzoneAPIClient.processStockData(resultArray, skuList);
-            context.getLogger().log("Processed stock data in-memory for " + processedSkuData.size() + " SKUs.");
+            context.getLogger().log("Processed stock data for " + processedSkuData.size() + " SKUs.");
 
 
             // 5. Update Neto items in parallel
@@ -145,8 +149,10 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
                 String sku = entry[0];
                 int quantity = Integer.parseInt(entry[1]);
 
+                // Log the SKU and quantity being sent to Neto
+                context.getLogger().log(String.format("Prepared to update Neto: SKU=%s, Quantity=%d", sku, quantity));
+
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    // context.getLogger().log(String.format("Attempting to update SKU: %s with Quantity: %d (Async)%n", sku, quantity)); // Reduced verbosity
                     DropshipzoneAPIClient.updateNetoItem(sku, quantity);
                 }, executorService);
 
@@ -180,4 +186,3 @@ public class LambdaHandler implements RequestHandler<ScheduledEvent, Void> {
         return null;
     }
 }
-
