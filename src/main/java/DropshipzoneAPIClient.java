@@ -207,7 +207,7 @@ public class DropshipzoneAPIClient {
             String sku = item.optString("sku", "INVALID_SKU");
             int stock_qty = 0;
             String cost = "0.00";
-            String sellingPrice = "0.0"; // Initialize selling price as a decimal string
+            String sellingPrice = "0.00"; // Initialize selling price as a decimal string
 
             if (!sku.equals("INVALID_SKU")) { // Only process if SKU is valid
                 String stockQtyStr = item.optString("stock_qty", "0");
@@ -235,20 +235,20 @@ public class DropshipzoneAPIClient {
                     double price = Double.parseDouble(priceStr);
                     double calculatedSellingPrice = price * priceMultiplier;
 
-                    // Apply the .9 decimal rule
+                    // Apply the .95 decimal rule
                     double sellingPriceValue;
                     // Using a small epsilon to check if it's effectively a whole number
                     if (Math.abs(calculatedSellingPrice - Math.round(calculatedSellingPrice)) < 0.00001) {
                         sellingPriceValue = calculatedSellingPrice; // Keep as whole number if it is (e.g., 14.0)
                     } else {
-                        // If it has any decimal part, set it to X.9
-                        sellingPriceValue = Math.floor(calculatedSellingPrice) + 0.9;
+                        // If it has any decimal part, set it to X.95
+                        sellingPriceValue = Math.floor(calculatedSellingPrice) + 0.95;
                     }
-                    sellingPrice = String.format("%.1f", sellingPriceValue); // Format to one decimal place
+                    sellingPrice = String.format("%.2f", sellingPriceValue); // Format to two decimal places
 
                 } catch (NumberFormatException e) {
-                    System.err.println("Warning: Invalid number format for 'price': '" + priceStr + "' for SKU " + sku + ". Defaulting selling price to 0.0.");
-                    sellingPrice = "0.0";
+                    System.err.println("Warning: Invalid number format for 'price': '" + priceStr + "' for SKU " + sku + ". Defaulting selling price to 0.00.");
+                    sellingPrice = "0.00";
                 }
 
 

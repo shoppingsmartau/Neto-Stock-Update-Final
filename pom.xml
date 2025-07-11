@@ -5,15 +5,16 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.example</groupId>
-    <artifactId>NetoStockPriceUpdate</artifactId>
+    <artifactId>dropshipzone-neto-integrator</artifactId>
     <version>1.0-SNAPSHOT</version>
 
     <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <aws.java.sdk.version>2.20.73</aws.java.sdk.version>
-        <jackson.version>2.15.2</jackson.version>
+        <aws.java.sdk.version>2.20.108</aws.java.sdk.version> <!-- Keep consistent with your S3 client -->
+        <aws.lambda.java.events.version>3.11.0</aws.lambda.java.events.version> <!-- Updated to a recent stable version -->
+        <org.json.version>20231013</org.json.version> <!-- Ensure this is also recent -->
     </properties>
 
     <dependencies>
@@ -23,81 +24,69 @@
             <artifactId>aws-lambda-java-core</artifactId>
             <version>1.2.2</version>
         </dependency>
+
         <!-- AWS Lambda Events (for ScheduledEvent) -->
         <dependency>
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-lambda-java-events</artifactId>
-            <version>3.11.0</version>
+            <version>${aws.lambda.java.events.version}</version>
         </dependency>
+
         <!-- AWS SDK for S3 -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
             <version>${aws.java.sdk.version}</version>
         </dependency>
-        <!-- AWS SDK URL Connection HTTP Client (explicitly for HttpClientBuilder) -->
+        <!-- AWS SDK HTTP Client (UrlConnectionHttpClient is for S3 client only) -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>url-connection-client</artifactId>
             <version>${aws.java.sdk.version}</version>
         </dependency>
+
         <!-- JSON Library -->
         <dependency>
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
-            <version>20240303</version>
+            <version>${org.json.version}</version>
         </dependency>
-        <!-- Joda-Time (if still used, typically replaced by java.time) -->
+
+        <!-- JUnit for testing (if you have tests) -->
         <dependency>
-            <groupId>joda-time</groupId>
-            <artifactId>joda-time</artifactId>
-            <version>2.6</version>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
         </dependency>
-        <!-- SLF4j API (for logging, though Lambda uses System.out/err directly) -->
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-            <version>1.7.30</version>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.8.1</version> <!-- Ensure this version supports target 11 -->
-                <configuration>
-                    <source>${maven.compiler.source}</source>
-                    <target>${maven.compiler.target}</target>
-                </configuration>
-            </plugin>
+            <!-- Plugin to create a single "uber" JAR with all dependencies -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.1</version>
+                <version>3.5.2</version>
                 <configuration>
                     <createDependencyReducedPom>false</createDependencyReducedPom>
                     <filters>
                         <filter>
+                            <!-- Exclude unnecessary files that can cause issues or bloat the JAR -->
                             <artifact>*:*</artifact>
                             <excludes>
-                                <!-- Exclude specific overlapping resource files to reduce warnings -->
                                 <exclude>META-INF/*.SF</exclude>
                                 <exclude>META-INF/*.DSA</exclude>
                                 <exclude>META-INF/*.RSA</exclude>
-                                <exclude>META-INF/LICENSE*</exclude>
-                                <exclude>META-INF/NOTICE*</exclude>
-                                <exclude>META-INF/MANIFEST.MF</exclude>
                             </excludes>
                         </filter>
                     </filters>
-                    <transformers>
-                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                            <mainClass></mainClass> <!-- No main class for Lambda -->
-                        </transformer>
-                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-                    </transformers>
                 </configuration>
                 <executions>
                     <execution>
@@ -105,6 +94,13 @@
                         <goals>
                             <goal>shade</goal>
                         </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass></mainClass> <!-- No main class needed for Lambda -->
+                                </transformer>
+                            </transformers>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
